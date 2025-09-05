@@ -1,120 +1,84 @@
-// src/ai/flows/generate-interactive-avatar-preview.ts
 'use server';
-/**
- * @fileOverview Generates an interactive avatar preview for narrated stories using AI.
- *
- * - generateInteractiveAvatarPreview - A function that generates the interactive avatar preview.
- * - GenerateInteractiveAvatarPreviewInput - The input type for the generateInteractiveAvatarPreview function.
- * - GenerateInteractiveAvatarPreviewOutput - The return type for the generateInteractiveAvatarPreview function.
- */
+import { ai } from '@/ai/genkit';
+import { z } from 'zod';
 
-import {ai} from '@/ai/genkit';
-import {z} from 'genkit';
-import wav from 'wav';
-
-const GenerateInteractiveAvatarPreviewInputSchema = z.object({
+const AvatarRequestSchema = z.object({
+  storyTranscript: z.string().describe('The full text of the family story.'),
   storyTitle: z.string().describe('The title of the story.'),
-  storyText: z.string().describe('The full text content of the story.'),
-  userName: z.string().describe('The name of the user providing the story.'),
-  userQuestion: z.string().optional().describe('Optional user question to the avatar.'),
+  familyName: z.string().describe('The name of the family member telling the story (e.g., Abuela María).'),
+  userQuestion: z.string().describe('The question the user is asking the family member.'),
 });
-export type GenerateInteractiveAvatarPreviewInput = z.infer<typeof GenerateInteractiveAvatarPreviewInputSchema>;
+export type AvatarRequest = z.infer<typeof AvatarRequestSchema>;
 
-const GenerateInteractiveAvatarPreviewOutputSchema = z.object({
-  avatarResponse: z.string().describe('The avatar\'s response to the story and user question, in text format.'),
-  audioDataUri: z.string().describe('The audio data URI of the avatar\'s response, in WAV format.'),
+const AvatarResponseSchema = z.object({
+  answer: z.string().describe("The generated answer from the family member's perspective."),
+  audioDataUri: z.string().describe("The audio data URI of the avatar's spoken response."),
 });
-export type GenerateInteractiveAvatarPreviewOutput = z.infer<typeof GenerateInteractiveAvatarPreviewOutputSchema>;
+export type AvatarResponse = z.infer<typeof AvatarResponseSchema>;
 
-async function toWav(
-  pcmData: Buffer,
-  channels = 1,
-  rate = 24000,
-  sampleWidth = 2
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const writer = new wav.Writer({
-      channels,
-      sampleRate: rate,
-      bitDepth: sampleWidth * 8,
-    });
-
-    let bufs = [] as any[];
-    writer.on('error', reject);
-    writer.on('data', function (d) {
-      bufs.push(d);
-    });
-    writer.on('end', function () {
-      resolve(Buffer.concat(bufs).toString('base64'));
-    });
-
-    writer.write(pcmData);
-    writer.end();
-  });
-}
-
-export async function generateInteractiveAvatarPreview(input: GenerateInteractiveAvatarPreviewInput): Promise<GenerateInteractiveAvatarPreviewOutput> {
+export async function generateInteractiveAvatarPreview(input: AvatarRequest): Promise<AvatarResponse> {
   return generateInteractiveAvatarPreviewFlow(input);
 }
 
-const generateInteractiveAvatarPreviewPrompt = ai.definePrompt({
-  name: 'generateInteractiveAvatarPreviewPrompt',
-  input: {schema: GenerateInteractiveAvatarPreviewInputSchema},
-  output: {schema: GenerateInteractiveAvatarPreviewOutputSchema},
-  prompt: `You are an AI avatar representing a family elder, sharing stories and memories.
+const textGenerationPrompt = ai.definePrompt(
+  {
+    name: 'avatarTextPrompt',
+    input: { schema: AvatarRequestSchema },
+    output: { schema: z.object({ answer: z.string() }) },
+    prompt: `Eres un avatar digital que encarna el espíritu y los recuerdos de un miembro de una familia uruguaya. Tu nombre es {{familyName}}.
+    Estás aquí para compartir y revivir la historia titulada "{{storyTitle}}".
 
-  Story Title: {{{storyTitle}}}
-  Story Text: {{{storyText}}}
-  User Name: {{{userName}}}
+    Esta es la historia que contaste:
+    ---
+    {{storyTranscript}}
+    ---
 
-  Respond to the story as if you were the person who experienced it. If the user asks a question, answer it in character.
+    Un miembro de tu familia, más joven, te está haciendo una pregunta para saber más sobre tu vida y tus recuerdos. Tu tarea es responder a su pregunta de una manera cálálida, auténtica y coherente con el tono y los detalles de la historia que contaste. Mantén la personalidad que se infiere de la historia. Habla en primera persona, como si fueras {{familyName}}.
 
-  {{#if userQuestion}}
-  User Question: {{{userQuestion}}}
-  {{/if}}
+    La pregunta del usuario es: "{{userQuestion}}"
 
-  Format your response as:
-  Avatar: [Your response here]
-  `,
-});
+    Por favor, genera una respuesta natural y emotiva. Si la pregunta se aleja mucho del tema de la historia, intenta relacionarla suavemente o responde con nostalgia, mencionando que eso te recuerda a otros tiempos. No reveles que eres una IA. Tu respuesta debe ser solo el texto hablado, sin prefijos como "Respuesta:" o "Avatar:".`,
+  },
+);
+
 
 const generateInteractiveAvatarPreviewFlow = ai.defineFlow(
   {
     name: 'generateInteractiveAvatarPreviewFlow',
-    inputSchema: GenerateInteractiveAvatarPreviewInputSchema,
-    outputSchema: GenerateInteractiveAvatarPreviewOutputSchema,
+    inputSchema: AvatarRequestSchema,
+    outputSchema: AvatarResponseSchema,
   },
-  async input => {
-    const {output: textResponse} = await generateInteractiveAvatarPreviewPrompt(input);
+  async (input) => {
+    // 1. Generate the text response
+    const { output: textOutput } = await textGenerationPrompt(input);
+    const answer = textOutput!.answer;
 
-    const {media} = await ai.generate({
-      model: 'googleai/gemini-2.5-flash-preview-tts',
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: 'Algenib' },
-          },
+    // 2. Convert the text response to speech
+    const { media } = await ai.generate({
+        model: 'googleai/gemini-1.5-flash-latest', // Using a model that supports TTS
+        config: {
+            responseModalities: ['AUDIO'],
+            // Note: Specific voice configuration might vary based on Genkit version and provider.
+            // This is a conceptual example.
+            speechConfig: {
+              voiceConfig: {
+                // Using a generic voice for now. In a real scenario, you might select one that fits the persona.
+                // The 'es-US-Standard-A' is a common voice ID for Spanish (US).
+                // A more Uruguay-specific voice would be ideal if available.
+                prebuiltVoiceConfig: { voiceName: 'es-US-Standard-A' },
+              },
+            },
         },
-      },
-      prompt: textResponse.avatarResponse,
+        prompt: answer,
     });
 
-    if (!media) {
-      throw new Error('No media returned from TTS model.');
+    if (!media || !media.url) {
+      throw new Error('No audio media returned from the text-to-speech model.');
     }
 
-    const audioBuffer = Buffer.from(
-      media.url.substring(media.url.indexOf(',') + 1),
-      'base64'
-    );
-
-    const audioDataUri = 'data:audio/wav;base64,' + (await toWav(audioBuffer));
-
     return {
-      avatarResponse: textResponse.avatarResponse,
-      audioDataUri: audioDataUri,
+      answer,
+      audioDataUri: media.url,
     };
-  }
+  },
 );
-
